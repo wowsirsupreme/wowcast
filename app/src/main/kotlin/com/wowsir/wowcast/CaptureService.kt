@@ -18,18 +18,11 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
-import java.util.concurrent.Callable
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
 
 /**
  * Captures the screen and streams frames to the MS2160/MS9120 dongle over USB.
- *
- * Pipelined: the capture thread converts each frame into a pooled buffer and hands
- * the newest one to a dedicated sender thread, which pushes it over USB while the
- * capture thread is already converting the next frame. Stale frames are dropped so
- * latency stays low. This overlaps CPU (conversion) with USB I/O, approaching the
- * throughput of the original app's native pipeline.
+ * Simple, single-threaded, synchronous path (proven stable). Each frame: convert,
+ * two control commands, one bulk send.
  */
 class CaptureService : Service() {
 
@@ -46,7 +39,6 @@ class CaptureService : Service() {
 
         private const val CHANNEL_ID = "wowcast_capture"
         private const val NOTIF_ID = 1001
-        private const val BULK_CHUNK = 131072
 
         @Volatile var isRunning = false
             private set
@@ -67,22 +59,13 @@ class CaptureService : Service() {
     private var bpp = 3
 
     private var srcBuf: ByteArray? = null
+    private var outBuf: ByteArray? = null
     private var frameId = 0
     private var started = false
-    private var convPool: ExecutorService? = null
-    private var nConv = 1
-
-    // Pipeline
-    private val poolLock = Object()
-    private val freeBuffers = ArrayDeque<ByteArray>()
-    private val readyLock = Object()
-    private var readyBuf: ByteArray? = null
-    private var readyLen = 0
-    @Volatile private var sending = false
-    private var senderThread: Thread? = null
     private var frameCount = 0
     private var perfLogged = false
     private var perfStart = 0L
+    @Volatile private var busy = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -130,19 +113,8 @@ class CaptureService : Service() {
             override fun onStop() { AppLog.log("MediaProjection stopped."); stopEverything() }
         }, handler)
 
-        nConv = Runtime.getRuntime().availableProcessors().coerceIn(1, 4)
-        convPool = Executors.newFixedThreadPool(nConv)
-
-        // Preallocate the buffer pool (3 buffers: converting / ready / sending).
-        val outLen = width * height * bpp
-        synchronized(poolLock) {
-            freeBuffers.clear()
-            repeat(3) { freeBuffers.addLast(ByteArray(outLen)) }
-        }
-        startSender()
-
         val density = resources.displayMetrics.densityDpi
-        val reader = ImageReader.newInstance(width, height, android.graphics.PixelFormat.RGBA_8888, 3)
+        val reader = ImageReader.newInstance(width, height, android.graphics.PixelFormat.RGBA_8888, 2)
         reader.setOnImageAvailableListener({ r -> onFrame(r) }, handler)
         imageReader = reader
 
@@ -159,14 +131,18 @@ class CaptureService : Service() {
         started = true
         isRunning = true
         perfStart = System.currentTimeMillis()
-        AppLog.log("Mirroring started (pipelined). Waiting for frames...")
+        AppLog.log("Mirroring started. Waiting for frames...")
         return START_NOT_STICKY
     }
 
-    /** Capture thread: convert the frame into a pooled buffer, hand newest to sender, drop stale. */
     private fun onFrame(reader: ImageReader) {
+        // Skip frames that arrive while we're still sending the previous one.
+        if (busy) { try { reader.acquireLatestImage()?.close() } catch (_: Exception) {}; return }
         val image = try { reader.acquireLatestImage() } catch (e: Exception) { null } ?: return
+        busy = true
         try {
+            val p = proto ?: return
+            val lnk = link ?: return
             val plane = image.planes[0]
             val buffer = plane.buffer
             val rowStride = plane.rowStride
@@ -177,93 +153,34 @@ class CaptureService : Service() {
             val n = buffer.remaining()
             if (src == null || src.size < n) { src = ByteArray(n); srcBuf = src }
             buffer.get(src, 0, n)
-            // image no longer needed after the copy
-            image.close()
-
-            val buf = synchronized(poolLock) { if (freeBuffers.isEmpty()) null else freeBuffers.removeLast() }
-            if (buf == null) return  // sender busy; drop this frame to stay low-latency
 
             val outLen = w * h * bpp
+            var out = outBuf
+            if (out == null || out.size < outLen) { out = ByteArray(outLen); outBuf = out }
             val extraPixels = (rowStride - w * 4) / 4
             val extra = if (extraPixels > 0) extraPixels else 0
-            convertParallel(src, w, h, extra, buf)
+            if (colorspace == MsProtocol.COLORSPACE_YUV422)
+                FrameConverter.rgbaToYuv422(src, w, h, extra, out)
+            else
+                FrameConverter.rgbaToChip(src, w, h, extra, out)
 
-            synchronized(readyLock) {
-                readyBuf?.let { old -> synchronized(poolLock) { freeBuffers.addLast(old) } }
-                readyBuf = buf
-                readyLen = outLen
-                readyLock.notifyAll()
+            p.frameTransferSwitch(frameId)
+            p.xdataWrite(MsProtocol.REG_VPACK_TRANSFER, 1)
+            val ok = lnk.sendFrame(out, outLen)
+            frameId = frameId xor 1
+            frameCount++
+            if (frameCount == 1) AppLog.log(if (ok) "First frame sent OK." else "First frame bulk FAILED (<0).")
+            if (!perfLogged && frameCount == 60) {
+                val secs = (System.currentTimeMillis() - perfStart) / 1000.0
+                if (secs > 0) AppLog.log("~%.1f fps over first 60 frames.".format(60.0 / secs))
+                perfLogged = true
             }
-            return
         } catch (e: Exception) {
-            AppLog.log("Frame convert error: ${e.message}")
+            AppLog.log("Frame error: ${e.message}")
         } finally {
             try { image.close() } catch (_: Exception) {}
+            busy = false
         }
-    }
-
-    /** Sender thread: push the newest ready buffer over USB while capture converts the next. */
-    private fun startSender() {
-        sending = true
-        senderThread = Thread {
-            while (sending) {
-                var buf: ByteArray? = null
-                var len = 0
-                synchronized(readyLock) {
-                    while (sending && readyBuf == null) readyLock.wait()
-                    if (!sending) return@Thread
-                    buf = readyBuf; len = readyLen; readyBuf = null
-                }
-                val b = buf ?: continue
-                val p = proto; val lnk = link
-                if (p == null || lnk == null) { returnBuffer(b); continue }
-                try {
-                    p.frameTransferSwitch(frameId)
-                    p.xdataWrite(MsProtocol.REG_VPACK_TRANSFER, 1)
-                    val ok = lnk.sendFrame(b, len)
-                    frameId = frameId xor 1
-                    frameCount++
-                    if (frameCount == 1) AppLog.log(if (ok) "First frame sent OK." else "First frame bulk FAILED (<0).")
-                    if (!perfLogged && frameCount == 60) {
-                        val secs = (System.currentTimeMillis() - perfStart) / 1000.0
-                        AppLog.log("~%.1f fps over first 60 frames.".format(60.0 / secs))
-                        perfLogged = true
-                    }
-                } catch (e: Exception) {
-                    AppLog.log("Send error: ${e.message}")
-                } finally {
-                    returnBuffer(b)
-                }
-            }
-        }.also { it.priority = Thread.MAX_PRIORITY; it.start() }
-    }
-
-    private fun returnBuffer(b: ByteArray) { synchronized(poolLock) { freeBuffers.addLast(b) } }
-
-    private fun convertParallel(src: ByteArray, w: Int, h: Int, extra: Int, out: ByteArray) {
-        val pool = convPool
-        val yuv = colorspace == MsProtocol.COLORSPACE_YUV422
-        if (pool == null || nConv <= 1 || h < 64) {
-            if (yuv) FrameConverter.rgbaToYuv422(src, w, h, extra, out)
-            else FrameConverter.rgbaToChip(src, w, h, extra, out)
-            return
-        }
-        val band = (h + nConv - 1) / nConv
-        val tasks = ArrayList<Callable<Unit>>(nConv)
-        var i = 0
-        while (i < nConv) {
-            val y0 = i * band
-            val y1 = if (y0 + band < h) y0 + band else h
-            if (y0 < y1) {
-                tasks.add(Callable {
-                    if (yuv) FrameConverter.rgbaToYuv422(src, w, h, extra, out, y0, y1)
-                    else FrameConverter.rgbaToChip(src, w, h, extra, out, y0, y1)
-                    Unit
-                })
-            }
-            i++
-        }
-        pool.invokeAll(tasks)
     }
 
     private fun startForegroundCompat() {
@@ -280,22 +197,15 @@ class CaptureService : Service() {
     }
 
     private fun stopEverything() {
-        sending = false
-        synchronized(readyLock) { readyLock.notifyAll() }
-        try { senderThread?.join(500) } catch (_: Exception) {}
-        senderThread = null
         try { proto?.stopTransmission() } catch (_: Exception) {}
         try { virtualDisplay?.release() } catch (_: Exception) {}
         try { imageReader?.close() } catch (_: Exception) {}
         try { projection?.stop() } catch (_: Exception) {}
         try { link?.close() } catch (_: Exception) {}
         thread?.quitSafely()
-        convPool?.shutdownNow(); convPool = null
-        synchronized(poolLock) { freeBuffers.clear() }
-        synchronized(readyLock) { readyBuf = null }
         virtualDisplay = null; imageReader = null; projection = null
         link = null; proto = null; thread = null; handler = null
-        started = false; isRunning = false; frameCount = 0; perfLogged = false
+        started = false; isRunning = false; frameCount = 0; perfLogged = false; busy = false
         stopForegroundCompat()
         stopSelf()
     }

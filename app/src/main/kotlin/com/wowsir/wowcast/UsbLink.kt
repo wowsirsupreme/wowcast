@@ -22,7 +22,7 @@ class UsbLink private constructor(
         const val VENDOR_ID = 0x534D
         const val PRODUCT_ID = 0x6021
         private const val BULK_ENDPOINT_ADDRESS = 0x04
-        private const val CHUNK = 262144   // 256 KB, multiple of 512
+        private const val CHUNK = 65536      // 64 KB, multiple of 512
 
         const val REQTYPE_WRITE = 0x21
         const val REQ_SET = 9
