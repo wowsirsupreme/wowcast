@@ -12,6 +12,8 @@ import android.hardware.usb.UsbManager
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.text.method.ScrollingMovementMethod
 import android.widget.ArrayAdapter
 import androidx.activity.result.contract.ActivityResultContracts
@@ -25,6 +27,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var mpm: MediaProjectionManager
 
     private var device: UsbDevice? = null
+
+    private val uiHandler = Handler(Looper.getMainLooper())
+    private val uiRefresh = object : Runnable {
+        override fun run() {
+            setRunningUi(CaptureService.isRunning)
+            uiHandler.postDelayed(this, 500)
+        }
+    }
 
     private data class Res(val label: String, val w: Int, val h: Int, val vic: Int)
     private val resolutions = listOf(
@@ -116,7 +126,20 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        setRunningUi(CaptureService.isRunning)
+        detectDevice()
+        uiHandler.removeCallbacks(uiRefresh)
+        uiHandler.post(uiRefresh)   // keep buttons in sync with the real service state
+    }
+
+    override fun onPause() {
+        super.onPause()
+        uiHandler.removeCallbacks(uiRefresh)
+    }
+
+    override fun onNewIntent(newIntent: Intent) {
+        super.onNewIntent(newIntent)
+        // Reuse this single instance (e.g. when the dongle is re-attached) instead of stacking copies.
+        setIntent(newIntent)
         detectDevice()
     }
 
@@ -127,6 +150,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onStartClicked() {
+        if (CaptureService.isRunning) { AppLog.log("Already mirroring."); setRunningUi(true); return }
         val dev = device
         if (dev == null) { AppLog.log("No dongle detected. Plug in the USB adapter."); return }
         if (usbManager.hasPermission(dev)) {
@@ -185,6 +209,7 @@ class MainActivity : AppCompatActivity() {
             "Dongle: connected (VID 0x%04X PID 0x%04X)".format(d.vendorId, d.productId)
         else "Dongle: not connected"
         b.startBtn.isEnabled = d != null && !CaptureService.isRunning
+        b.stopBtn.isEnabled = CaptureService.isRunning
     }
 
     private fun setRunningUi(running: Boolean) {
