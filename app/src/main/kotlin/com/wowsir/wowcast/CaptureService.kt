@@ -30,10 +30,11 @@ class CaptureService : Service() {
         const val EXTRA_WIDTH = "width"
         const val EXTRA_HEIGHT = "height"
         const val EXTRA_VIC = "vic"
+        const val EXTRA_COLOR = "color"
 
         private const val CHANNEL_ID = "wowcast_capture"
         private const val NOTIF_ID = 1001
-        private const val BULK_CHUNK = 16384
+        private const val BULK_CHUNK = 131072
 
         @Volatile var isRunning = false
             private set
@@ -50,6 +51,7 @@ class CaptureService : Service() {
     private var width = 1280
     private var height = 720
     private var vic = MsProtocol.VIC_1280x720_60
+    private var colorspace = MsProtocol.COLORSPACE_RGB888
 
     private var srcBuf: ByteArray? = null
     private var outBuf: ByteArray? = null
@@ -67,6 +69,7 @@ class CaptureService : Service() {
         width = intent.getIntExtra(EXTRA_WIDTH, 1280)
         height = intent.getIntExtra(EXTRA_HEIGHT, 720)
         vic = intent.getIntExtra(EXTRA_VIC, MsProtocol.VIC_1280x720_60)
+        colorspace = intent.getIntExtra(EXTRA_COLOR, MsProtocol.COLORSPACE_RGB888)
         val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
         val resultData: Intent? = getParcelable(intent, EXTRA_RESULT_DATA, Intent::class.java)
         val device: UsbDevice? = getParcelable(intent, EXTRA_USB_DEVICE, UsbDevice::class.java)
@@ -91,8 +94,8 @@ class CaptureService : Service() {
         }
         link = l
         try {
-            proto = MsProtocol(l).also { it.startTransmission(width, height, vic) }
-            AppLog.log("Dongle initialized (${width}x${height}). Sent start-up sequence.")
+            proto = MsProtocol(l).also { it.startTransmission(width, height, vic, colorspace) }
+            AppLog.log("Dongle initialized (${width}x${height}, color=$colorspace). Sent start-up sequence.")
         } catch (e: Exception) {
             AppLog.log("Chip start-up failed: ${e.javaClass.simpleName}: ${e.message}")
             stopEverything(); return START_NOT_STICKY
@@ -156,11 +159,16 @@ class CaptureService : Service() {
             val n = buffer.remaining()
             buffer.get(src, 0, n)
 
-            val outLen = w * h * 3
+            val bpp = if (colorspace == MsProtocol.COLORSPACE_YUV422) 2 else 3
+            val outLen = w * h * bpp
             var out = outBuf
             if (out == null || out.size < outLen) { out = ByteArray(outLen); outBuf = out }
             val extraPixels = (rowStride - w * 4) / 4
-            FrameConverter.rgbaToChip(src, w, h, if (extraPixels > 0) extraPixels else 0, out)
+            val extra = if (extraPixels > 0) extraPixels else 0
+            if (colorspace == MsProtocol.COLORSPACE_YUV422)
+                FrameConverter.rgbaToYuv422(src, w, h, extra, out)
+            else
+                FrameConverter.rgbaToChip(src, w, h, extra, out)
 
             p.frameTransferSwitch(frameId)
             p.xdataWrite(MsProtocol.REG_VPACK_TRANSFER, 1)

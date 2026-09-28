@@ -32,6 +32,12 @@ class MainActivity : AppCompatActivity() {
         Res("1920 x 1080 (1080p)", 1920, 1080, MsProtocol.VIC_1920x1080_60)
     )
 
+    private data class ColorMode(val label: String, val value: Int)
+    private val colorModes = listOf(
+        ColorMode("RGB (compatible)", MsProtocol.COLORSPACE_RGB888),
+        ColorMode("YUV422 (faster)", MsProtocol.COLORSPACE_YUV422)
+    )
+
     private val usbPermissionAction get() = "$packageName.USB_PERMISSION"
 
     private val projectionLauncher =
@@ -79,6 +85,9 @@ class MainActivity : AppCompatActivity() {
 
         b.resSpinner.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item, resolutions.map { it.label }
+        )
+        b.colorSpinner.adapter = ArrayAdapter(
+            this, android.R.layout.simple_spinner_dropdown_item, colorModes.map { it.label }
         )
 
         b.startBtn.setOnClickListener { onStartClicked() }
@@ -153,10 +162,11 @@ class MainActivity : AppCompatActivity() {
             putExtra(CaptureService.EXTRA_WIDTH, res.w)
             putExtra(CaptureService.EXTRA_HEIGHT, res.h)
             putExtra(CaptureService.EXTRA_VIC, res.vic)
+            putExtra(CaptureService.EXTRA_COLOR, colorModes[b.colorSpinner.selectedItemPosition].value)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(svc)
         else startService(svc)
-        AppLog.log("Screen capture granted. Starting mirroring at ${res.label}...")
+        AppLog.log("Screen capture granted. Starting at ${res.label}, ${colorModes[b.colorSpinner.selectedItemPosition].label}...")
         setRunningUi(true)
     }
 

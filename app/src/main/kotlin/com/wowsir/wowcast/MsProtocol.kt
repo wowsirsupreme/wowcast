@@ -43,9 +43,9 @@ class MsProtocol(private val link: UsbLink) {
         return link.controlWrite(bytes(0xB6, (addr shr 8) and 0xFF, addr and 0xFF, value and 0xFF, flag, 0, 0, 0))
     }
 
-    fun startTransmission(width: Int, height: Int, vic: Int) {
+    fun startTransmission(width: Int, height: Int, vic: Int, colorspace: Int = COLORSPACE_RGB888) {
         val alignedW = (width + 3) and 3.inv()
-        val colorByte = (COLORSPACE_RGB888 shl 4) or COLORSPACE_RGB888
+        val colorByte = (colorspace shl 4) or colorspace
         val r1 = setPowerOn(true)
         val r2 = setTransferModeFrame()
         val r3 = setVideoIn(alignedW, height, colorByte, 0)

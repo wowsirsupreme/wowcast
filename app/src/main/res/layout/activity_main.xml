@@ -36,6 +36,18 @@
         android:id="@+id/resSpinner"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:paddingBottom="12dp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Color mode"
+        android:paddingBottom="4dp" />
+
+    <Spinner
+        android:id="@+id/colorSpinner"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
         android:paddingBottom="16dp" />
 
     <Button
