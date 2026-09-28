@@ -18,8 +18,11 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # ubuntu-latest already ships a full Android SDK with licenses accepted.
+      # We use it directly instead of android-actions/setup-android (which broke
+      # by fetching a newer cmdline-tools that hangs on an interactive license prompt).
+      - name: Accept Android SDK licenses (defensive)
+        run: yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
 
       - name: Make gradlew executable
         run: chmod +x ./gradlew
