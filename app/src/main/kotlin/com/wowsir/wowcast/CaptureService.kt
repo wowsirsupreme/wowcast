@@ -18,17 +18,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
-import android.util.Log
 
-/**
- * Foreground service that captures the screen via MediaProjection and streams
- * each frame to the MS2160/MS9120 dongle over USB, reproducing the original
- * app's pure-Java transfer path.
- *
- * Audio: this service sends video only. The dongle exposes its own USB Audio
- * Class interface, and Android routes system/media sound to it automatically
- * (as on the Samsung), so no audio handling is needed here.
- */
 class CaptureService : Service() {
 
     companion object {
@@ -44,7 +34,6 @@ class CaptureService : Service() {
         private const val CHANNEL_ID = "wowcast_capture"
         private const val NOTIF_ID = 1001
         private const val BULK_CHUNK = 16384
-        private const val TAG = "WOWCast/Service"
 
         @Volatile var isRunning = false
             private set
@@ -66,13 +55,13 @@ class CaptureService : Service() {
     private var outBuf: ByteArray? = null
     private var frameId = 0
     private var started = false
+    private var frameCount = 0
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent == null || intent.action == ACTION_STOP) {
-            stopEverything()
-            return START_NOT_STICKY
+            stopEverything(); return START_NOT_STICKY
         }
 
         width = intent.getIntExtra(EXTRA_WIDTH, 1280)
@@ -82,44 +71,51 @@ class CaptureService : Service() {
         val resultData: Intent? = getParcelable(intent, EXTRA_RESULT_DATA, Intent::class.java)
         val device: UsbDevice? = getParcelable(intent, EXTRA_USB_DEVICE, UsbDevice::class.java)
 
-        startForegroundCompat()
-
-        if (device == null || resultData == null || resultCode == 0) {
-            Log.e(TAG, "Missing start extras")
-            stopEverything()
-            return START_NOT_STICKY
+        try {
+            startForegroundCompat()
+        } catch (e: Exception) {
+            AppLog.log("Foreground service failed: ${e.javaClass.simpleName}: ${e.message}")
+            stopEverything(); return START_NOT_STICKY
         }
 
-        // 1) Open USB and run the chip start-up sequence.
+        if (device == null || resultData == null || resultCode == 0) {
+            AppLog.log("Service missing start data (device/result). Aborting.")
+            stopEverything(); return START_NOT_STICKY
+        }
+
         val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
         val l = UsbLink.open(usbManager, device)
         if (l == null) {
-            Log.e(TAG, "USB open failed")
-            stopEverything()
-            return START_NOT_STICKY
+            AppLog.log("USB open/claim failed. Could not talk to the dongle.")
+            stopEverything(); return START_NOT_STICKY
         }
         link = l
-        proto = MsProtocol(l).also { it.startTransmission(width, height, vic) }
+        try {
+            proto = MsProtocol(l).also { it.startTransmission(width, height, vic) }
+            AppLog.log("Dongle initialized (${width}x${height}). Sent start-up sequence.")
+        } catch (e: Exception) {
+            AppLog.log("Chip start-up failed: ${e.javaClass.simpleName}: ${e.message}")
+            stopEverything(); return START_NOT_STICKY
+        }
 
-        // 2) Start MediaProjection -> VirtualDisplay -> ImageReader.
         val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        val mp = mpm.getMediaProjection(resultCode, resultData)
+        val mp = try {
+            mpm.getMediaProjection(resultCode, resultData)
+        } catch (e: Exception) {
+            AppLog.log("getMediaProjection threw: ${e.javaClass.simpleName}: ${e.message}")
+            null
+        }
         if (mp == null) {
-            Log.e(TAG, "getMediaProjection returned null")
-            stopEverything()
-            return START_NOT_STICKY
+            AppLog.log("MediaProjection was null. Aborting.")
+            stopEverything(); return START_NOT_STICKY
         }
         projection = mp
 
         thread = HandlerThread("wowcast-capture").apply { start() }
         handler = Handler(thread!!.looper)
 
-        // Register a callback (required on Android 14+).
         mp.registerCallback(object : MediaProjection.Callback() {
-            override fun onStop() {
-                Log.i(TAG, "MediaProjection stopped")
-                stopEverything()
-            }
+            override fun onStop() { AppLog.log("MediaProjection stopped."); stopEverything() }
         }, handler)
 
         val density = resources.displayMetrics.densityDpi
@@ -127,25 +123,25 @@ class CaptureService : Service() {
         reader.setOnImageAvailableListener({ r -> onFrame(r) }, handler)
         imageReader = reader
 
-        virtualDisplay = mp.createVirtualDisplay(
-            "wowcast",
-            width, height, density,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            reader.surface, null, handler
-        )
+        try {
+            virtualDisplay = mp.createVirtualDisplay(
+                "wowcast", width, height, density,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                reader.surface, null, handler
+            )
+        } catch (e: Exception) {
+            AppLog.log("createVirtualDisplay failed: ${e.javaClass.simpleName}: ${e.message}")
+            stopEverything(); return START_NOT_STICKY
+        }
 
         started = true
         isRunning = true
-        Log.i(TAG, "Mirroring started ${width}x${height} vic=$vic")
+        AppLog.log("Mirroring started. Waiting for frames...")
         return START_NOT_STICKY
     }
 
     private fun onFrame(reader: ImageReader) {
-        val image = try {
-            reader.acquireLatestImage()
-        } catch (e: Exception) {
-            Log.w(TAG, "acquireLatestImage: ${e.message}"); null
-        } ?: return
+        val image = try { reader.acquireLatestImage() } catch (e: Exception) { null } ?: return
         try {
             val p = proto ?: return
             val lnk = link ?: return
@@ -156,33 +152,32 @@ class CaptureService : Service() {
             val h = image.height
 
             var src = srcBuf
-            if (src == null || src.size < buffer.remaining()) {
-                src = ByteArray(buffer.remaining()); srcBuf = src
-            }
+            if (src == null || src.size < buffer.remaining()) { src = ByteArray(buffer.remaining()); srcBuf = src }
             val n = buffer.remaining()
             buffer.get(src, 0, n)
 
             val outLen = w * h * 3
             var out = outBuf
-            if (out == null || out.size < outLen) {
-                out = ByteArray(outLen); outBuf = out
-            }
+            if (out == null || out.size < outLen) { out = ByteArray(outLen); outBuf = out }
             val extraPixels = (rowStride - w * 4) / 4
             FrameConverter.rgbaToChip(src, w, h, if (extraPixels > 0) extraPixels else 0, out)
 
-            // Per-frame control handshake, then bulk the pixels in 16 KB chunks.
             p.frameTransferSwitch(frameId)
             p.xdataWrite(MsProtocol.REG_VPACK_TRANSFER, 1)
             var offset = 0
+            var ok = true
             while (offset < outLen) {
                 val len = minOf(BULK_CHUNK, outLen - offset)
                 val sent = lnk.bulk(out, offset, len)
-                if (sent < 0) { Log.w(TAG, "bulk failed at $offset"); break }
+                if (sent < 0) { ok = false; break }
                 offset += len
             }
             frameId = frameId xor 1
+            frameCount++
+            if (frameCount == 1) AppLog.log(if (ok) "First frame sent to dongle OK." else "First frame bulk transfer FAILED (USB write returned <0).")
+            else if (frameCount % 120 == 0) AppLog.log("Sent $frameCount frames.")
         } catch (e: Exception) {
-            Log.e(TAG, "onFrame error", e)
+            AppLog.log("Frame error: ${e.javaClass.simpleName}: ${e.message}")
         } finally {
             image.close()
         }
@@ -209,9 +204,6 @@ class CaptureService : Service() {
     }
 
     private fun stopEverything() {
-        if (!isRunning && !started) {
-            stopForegroundCompat(); stopSelf(); return
-        }
         try { proto?.stopTransmission() } catch (_: Exception) {}
         try { virtualDisplay?.release() } catch (_: Exception) {}
         try { imageReader?.close() } catch (_: Exception) {}
@@ -220,29 +212,20 @@ class CaptureService : Service() {
         thread?.quitSafely()
         virtualDisplay = null; imageReader = null; projection = null
         link = null; proto = null; thread = null; handler = null
-        started = false; isRunning = false
+        started = false; isRunning = false; frameCount = 0
         stopForegroundCompat()
         stopSelf()
     }
 
     private fun stopForegroundCompat() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-        } else {
-            @Suppress("DEPRECATION") stopForeground(true)
-        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) stopForeground(STOP_FOREGROUND_REMOVE)
+        else @Suppress("DEPRECATION") stopForeground(true)
     }
 
-    override fun onDestroy() {
-        stopEverything()
-        super.onDestroy()
-    }
+    override fun onDestroy() { stopEverything(); super.onDestroy() }
 
     private fun <T> getParcelable(intent: Intent, key: String, clazz: Class<T>): T? {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            intent.getParcelableExtra(key, clazz)
-        } else {
-            @Suppress("DEPRECATION") intent.getParcelableExtra(key) as? T
-        }
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) intent.getParcelableExtra(key, clazz)
+        else @Suppress("DEPRECATION") intent.getParcelableExtra(key) as? T
     }
 }

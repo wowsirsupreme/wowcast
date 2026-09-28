@@ -26,7 +26,6 @@ class MainActivity : AppCompatActivity() {
 
     private var device: UsbDevice? = null
 
-    // Resolution choices -> chip VIC codes.
     private data class Res(val label: String, val w: Int, val h: Int, val vic: Int)
     private val resolutions = listOf(
         Res("1280 x 720 (720p)", 1280, 720, MsProtocol.VIC_1280x720_60),
@@ -37,28 +36,32 @@ class MainActivity : AppCompatActivity() {
 
     private val projectionLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            AppLog.log("Screen-capture consent returned: resultCode=${result.resultCode} " +
+                "(OK=${Activity.RESULT_OK}, CANCELED=${Activity.RESULT_CANCELED}), data=${result.data != null}")
             if (result.resultCode == Activity.RESULT_OK && result.data != null) {
                 startMirroring(result.resultCode, result.data!!)
             } else {
-                log("Screen-capture permission denied.")
+                AppLog.log("Screen capture not granted. If no dialog appeared, HyperOS/Knox may be blocking it.")
             }
         }
 
     private val notifLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* best effort */ }
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 usbPermissionAction -> {
                     val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
-                    if (granted) { log("USB permission granted."); requestProjection() }
-                    else log("USB permission denied.")
+                    if (granted) {
+                        AppLog.log("USB permission granted. Tap 'Start mirroring' again to continue.")
+                    } else {
+                        AppLog.log("USB permission denied.")
+                    }
+                    refreshStatus()
                 }
-                UsbManager.ACTION_USB_DEVICE_ATTACHED -> { detectDevice(); }
-                UsbManager.ACTION_USB_DEVICE_DETACHED -> {
-                    device = null; refreshStatus()
-                }
+                UsbManager.ACTION_USB_DEVICE_ATTACHED -> detectDevice()
+                UsbManager.ACTION_USB_DEVICE_DETACHED -> { device = null; refreshStatus() }
             }
         }
     }
@@ -68,6 +71,8 @@ class MainActivity : AppCompatActivity() {
         b = ActivityMainBinding.inflate(layoutInflater)
         setContentView(b.root)
         b.logView.movementMethod = ScrollingMovementMethod()
+        b.logView.text = AppLog.dump()
+        AppLog.listener = { text -> runOnUiThread { b.logView.text = text } }
 
         usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
         mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -79,7 +84,7 @@ class MainActivity : AppCompatActivity() {
         b.startBtn.setOnClickListener { onStartClicked() }
         b.stopBtn.setOnClickListener {
             startService(Intent(this, CaptureService::class.java).setAction(CaptureService.ACTION_STOP))
-            log("Stop requested.")
+            AppLog.log("Stop requested.")
             setRunningUi(false)
         }
 
@@ -96,6 +101,7 @@ class MainActivity : AppCompatActivity() {
         }
         registerReceiverCompat(filter)
 
+        AppLog.log("WOWCast 1.1 started.")
         detectDevice()
     }
 
@@ -106,13 +112,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        AppLog.listener = null
         try { unregisterReceiver(usbReceiver) } catch (_: Exception) {}
         super.onDestroy()
     }
 
     private fun onStartClicked() {
         val dev = device
-        if (dev == null) { log("No dongle detected. Plug in the USB adapter."); return }
+        if (dev == null) { AppLog.log("No dongle detected. Plug in the USB adapter."); return }
         if (usbManager.hasPermission(dev)) {
             requestProjection()
         } else {
@@ -121,13 +128,18 @@ class MainActivity : AppCompatActivity() {
             val pi = android.app.PendingIntent.getBroadcast(
                 this, 0, Intent(usbPermissionAction).setPackage(packageName), flags
             )
+            AppLog.log("Requesting USB permission for the dongle...")
             usbManager.requestPermission(dev, pi)
-            log("Requesting USB permission...")
         }
     }
 
     private fun requestProjection() {
-        projectionLauncher.launch(mpm.createScreenCaptureIntent())
+        try {
+            AppLog.log("Launching screen-capture consent dialog...")
+            projectionLauncher.launch(mpm.createScreenCaptureIntent())
+        } catch (e: Exception) {
+            AppLog.log("Could not launch screen-capture consent: ${e.javaClass.simpleName}: ${e.message}")
+        }
     }
 
     private fun startMirroring(resultCode: Int, data: Intent) {
@@ -144,13 +156,12 @@ class MainActivity : AppCompatActivity() {
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(svc)
         else startService(svc)
-        log("Started mirroring at ${res.label}.")
+        AppLog.log("Screen capture granted. Starting mirroring at ${res.label}...")
         setRunningUi(true)
     }
 
     private fun detectDevice() {
         val found = UsbLink.findDongle(usbManager)
-        // Prefer a device delivered by the ATTACHED intent, if present.
         val attached: UsbDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
             intent?.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
         else @Suppress("DEPRECATION") intent?.getParcelableExtra(UsbManager.EXTRA_DEVICE)
@@ -169,10 +180,6 @@ class MainActivity : AppCompatActivity() {
     private fun setRunningUi(running: Boolean) {
         b.startBtn.isEnabled = !running && device != null
         b.stopBtn.isEnabled = running
-    }
-
-    private fun log(msg: String) {
-        runOnUiThread { b.logView.append(msg + "\n") }
     }
 
     private fun registerReceiverCompat(filter: IntentFilter) {
