@@ -11,8 +11,8 @@ android {
         applicationId = "com.wowsir.wowcast"
         minSdk = 26
         targetSdk = 34
-        versionCode = 8
-        versionName = "1.7"
+        versionCode = 9
+        versionName = "1.8"
         // Pure Kotlin, no native libs -> runs on every ABI (arm64-v8a, armeabi-v7a, x86, x86_64).
     }
 
