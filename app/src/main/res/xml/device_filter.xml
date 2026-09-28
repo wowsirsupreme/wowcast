@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- MacroSilicon MS2160 / MS9120 USB display dongle. VID 0x534D ("SM"), PID 0x6021. -->
+    <usb-device vendor-id="21325" product-id="24609" />
+</resources>
