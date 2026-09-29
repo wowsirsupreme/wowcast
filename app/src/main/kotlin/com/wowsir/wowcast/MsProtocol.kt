@@ -10,9 +10,11 @@ class MsProtocol(private val link: UsbLink) {
         const val COLORSPACE_RGB888 = 1
         const val COLORSPACE_YUV422 = 2
         const val TRANSFER_MODE_FRAME = 0
-        const val VIC_720x480P_60 = 2
-        const val VIC_720x576P_50 = 17
+        const val VIC_640x480_60 = 64
+        const val VIC_800x600_60 = 66
+        const val VIC_1024x768_60 = 71
         const val VIC_1280x720_60 = 79
+        const val VIC_1360x768_60 = 100
         const val VIC_1920x1080_60 = 129
         const val REG_VPACK_TRANSFER = 61954  // 0xF202
         const val OUT_COLORSPACE = 0

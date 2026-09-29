@@ -57,6 +57,7 @@ class CaptureService : Service() {
     private var height = 720
     private var vic = MsProtocol.VIC_1280x720_60
     private var colorspace = MsProtocol.COLORSPACE_RGB888
+    private var colorMode = 1   // 1=RGB888, 2=YUV422 YUYV, 3=YUV422 UYVY
     private var bpp = 3
 
     private var srcBuf: ByteArray? = null
@@ -76,8 +77,9 @@ class CaptureService : Service() {
         width = intent.getIntExtra(EXTRA_WIDTH, 1280)
         height = intent.getIntExtra(EXTRA_HEIGHT, 720)
         vic = intent.getIntExtra(EXTRA_VIC, MsProtocol.VIC_1280x720_60)
-        colorspace = intent.getIntExtra(EXTRA_COLOR, MsProtocol.COLORSPACE_RGB888)
-        bpp = if (colorspace == MsProtocol.COLORSPACE_YUV422) 2 else 3
+        colorMode = intent.getIntExtra(EXTRA_COLOR, 1)
+        colorspace = if (colorMode == 1) MsProtocol.COLORSPACE_RGB888 else MsProtocol.COLORSPACE_YUV422
+        bpp = if (colorMode == 1) 3 else 2
         val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
         val resultData: Intent? = getParcelable(intent, EXTRA_RESULT_DATA, Intent::class.java)
         val device: UsbDevice? = getParcelable(intent, EXTRA_USB_DEVICE, UsbDevice::class.java)
@@ -162,10 +164,11 @@ class CaptureService : Service() {
             if (out == null || out.size < outLen) { out = ByteArray(outLen); outBuf = out }
             val extraPixels = (rowStride - w * 4) / 4
             val extra = if (extraPixels > 0) extraPixels else 0
-            if (colorspace == MsProtocol.COLORSPACE_YUV422)
-                FrameConverter.rgbaToYuv422(src, w, h, extra, out)
-            else
-                FrameConverter.rgbaToChip(src, w, h, extra, out)
+            when (colorMode) {
+                2 -> FrameConverter.rgbaToYuv422(src, w, h, extra, out)
+                3 -> FrameConverter.rgbaToUyvy(src, w, h, extra, out)
+                else -> FrameConverter.rgbaToChip(src, w, h, extra, out)
+            }
 
             p.frameTransferSwitch(frameId)
             p.xdataWrite(MsProtocol.REG_VPACK_TRANSFER, 1)

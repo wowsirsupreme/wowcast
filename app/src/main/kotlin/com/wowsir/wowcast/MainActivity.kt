@@ -14,6 +14,11 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.net.Uri
+import android.widget.TextView
+import android.widget.Toast
 import android.text.method.ScrollingMovementMethod
 import android.widget.ArrayAdapter
 import androidx.activity.result.contract.ActivityResultContracts
@@ -38,14 +43,20 @@ class MainActivity : AppCompatActivity() {
 
     private data class Res(val label: String, val w: Int, val h: Int, val vic: Int)
     private val resolutions = listOf(
-        Res("1280 x 720 (720p)", 1280, 720, MsProtocol.VIC_1280x720_60),
-        Res("1920 x 1080 (1080p)", 1920, 1080, MsProtocol.VIC_1920x1080_60)
+        Res("640 x 480  – small / lowest lag (4:3)", 640, 480, MsProtocol.VIC_640x480_60),
+        Res("800 x 600  – projector (4:3)", 800, 600, MsProtocol.VIC_800x600_60),
+        Res("1024 x 768  – projector / monitor (4:3)", 1024, 768, MsProtocol.VIC_1024x768_60),
+        Res("1280 x 720  – 720p TV (16:9) ★ recommended", 1280, 720, MsProtocol.VIC_1280x720_60),
+        Res("1360 x 768  – laptop / monitor (16:9)", 1360, 768, MsProtocol.VIC_1360x768_60),
+        Res("1920 x 1080  – 1080p TV (16:9) – heavy", 1920, 1080, MsProtocol.VIC_1920x1080_60)
     )
+    private val defaultResIndex = 3  // 1280 x 720
 
     private data class ColorMode(val label: String, val value: Int)
     private val colorModes = listOf(
-        ColorMode("RGB (compatible)", MsProtocol.COLORSPACE_RGB888),
-        ColorMode("YUV422 (faster)", MsProtocol.COLORSPACE_YUV422)
+        ColorMode("RGB (stable)", 1),
+        ColorMode("YUV422 A - faster (try for smoother)", 2),
+        ColorMode("YUV422 B - faster (if A looks wrong)", 3)
     )
 
     private val usbPermissionAction get() = "$packageName.USB_PERMISSION"
@@ -99,6 +110,8 @@ class MainActivity : AppCompatActivity() {
         b.colorSpinner.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item, colorModes.map { it.label }
         )
+        b.resSpinner.setSelection(defaultResIndex)
+        setupAbout()
 
         b.startBtn.setOnClickListener { onStartClicked() }
         b.stopBtn.setOnClickListener {
@@ -215,6 +228,31 @@ class MainActivity : AppCompatActivity() {
     private fun setRunningUi(running: Boolean) {
         b.startBtn.isEnabled = !running && device != null
         b.stopBtn.isEnabled = running
+    }
+
+    private fun setupAbout() {
+        try {
+            val v = packageManager.getPackageInfo(packageName, 0).versionName
+            findViewById<TextView>(R.id.versionRow).text = "Version $v"
+        } catch (_: Exception) {}
+
+        findViewById<TextView>(R.id.emailRow).setOnClickListener {
+            try {
+                startActivity(Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:wilfanet.info@gmail.com")))
+            } catch (e: Exception) {
+                copyToClipboard("Email", "wilfanet.info@gmail.com")
+            }
+        }
+        findViewById<TextView>(R.id.whatsappRow).setOnClickListener {
+            // No reliable deep link for a handle, so copy it for the user to paste in WhatsApp.
+            copyToClipboard("WhatsApp handle", "@wowsirdps")
+        }
+    }
+
+    private fun copyToClipboard(label: String, text: String) {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        cm.setPrimaryClip(ClipData.newPlainText(label, text))
+        Toast.makeText(this, "$label copied: $text", Toast.LENGTH_SHORT).show()
     }
 
     private fun registerReceiverCompat(filter: IntentFilter) {
